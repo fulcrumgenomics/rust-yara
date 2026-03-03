@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 
 use crate::error::YaraError;
 use crate::ffi_helpers::{collect_contig_lengths, collect_contig_names, path_to_cstring};
-use crate::options::MapperOptions;
+use crate::options::{MapperOptions, SecondaryMode};
 use crate::record::{CigarOp, YaraRecord};
 
 /// One end (read 1 or read 2) of a paired-end read.
@@ -114,6 +114,7 @@ impl ReadBatch {
 /// [`Sync`].
 pub struct YaraMapper {
     handle: NonNull<yara_mapper_sys::YaraMapperHandle>,
+    secondary_mode: SecondaryMode,
 }
 
 // SAFETY: The C++ handle owns all its memory and can be moved between threads.
@@ -150,10 +151,12 @@ impl YaraMapper {
             )
         };
 
-        NonNull::new(handle).map(|h| Self { handle: h }).ok_or_else(|| {
-            let msg = unsafe { CStr::from_ptr(error_buf.as_ptr().cast()) };
-            YaraError::IndexOpen(msg.to_string_lossy().into_owned())
-        })
+        NonNull::new(handle)
+            .map(|h| Self { handle: h, secondary_mode: options.secondary_mode })
+            .ok_or_else(|| {
+                let msg = unsafe { CStr::from_ptr(error_buf.as_ptr().cast()) };
+                YaraError::IndexOpen(msg.to_string_lossy().into_owned())
+            })
     }
 
     /// Map a batch of paired-end reads and return alignment records.
@@ -187,7 +190,7 @@ impl YaraMapper {
             count: reads.len(),
         };
 
-        let capacity = reads.len() * RECORDS_PER_PAIR;
+        let capacity = reads.len() * records_per_pair(self.secondary_mode);
         // SAFETY: YaraAlignmentRecord is #[repr(C)] POD — all-zeros is a valid
         // representation (null pointers, zero scalars).
         let mut out_records: Vec<yara_mapper_sys::YaraAlignmentRecord> =
@@ -270,9 +273,15 @@ impl Drop for YaraMapper {
     }
 }
 
-/// Heuristic upper bound on records per read pair.  In `SecondaryMode::Record`
-/// mode each secondary is a separate record; 10x accommodates this generously.
-const RECORDS_PER_PAIR: usize = 10;
+/// Upper bound on records per read pair, depending on secondary mode.
+/// `Tag`/`Omit`: each read end produces exactly one record, so 2 per pair.
+/// `Record`: secondaries are separate records; 10 per pair is generous.
+fn records_per_pair(mode: SecondaryMode) -> usize {
+    match mode {
+        SecondaryMode::Tag | SecondaryMode::Omit => 2,
+        SecondaryMode::Record => 10,
+    }
+}
 
 /// Collect raw pointers from a slice of `CString` values for the C API.
 fn cstring_ptrs(strings: &[CString]) -> Vec<*const i8> {

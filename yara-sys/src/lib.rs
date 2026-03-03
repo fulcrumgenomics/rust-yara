@@ -80,7 +80,7 @@ pub struct YaraAlignmentRecord {
     pub flag: u16,
 
     // CIGAR (BAM-encoded uint32 array: op | len<<4)
-    pub cigar: *const u32,
+    pub cigar: *mut u32,
     pub cigar_len: u32,
 
     // Sequence and quality (NULL for secondaries)
