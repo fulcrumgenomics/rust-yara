@@ -1,0 +1,20 @@
+[package]
+name = "yara-mapper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Nils Homer <nils@fulcrumgenomics.com>"]
+description = "Safe Rust wrapper for the YARA read mapper"
+repository.workspace = true
+homepage = "https://github.com/fulcrumgenomics/rust-yara"
+documentation = "https://docs.rs/yara-mapper"
+readme = "../README.md"
+categories = ["science"]
+keywords = ["bioinformatics", "yara", "alignment", "sequencing", "ngs"]
+license.workspace = true
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dependencies]
+yara-mapper-sys = { path = "../yara-sys" }
