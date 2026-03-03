@@ -29,6 +29,7 @@ fn main() {
         .opt_level_str("2")
         .define("SEQAN_HAS_ZLIB", "1")
         .define("YARA_LARGE_CONTIGS", "1")
+        .define("NDEBUG", None)
         // Suppress common SeqAn2 warnings that are harmless.
         .flag("-Wno-unused-parameter")
         .flag("-Wno-sign-compare")
