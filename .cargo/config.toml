@@ -1,0 +1,4 @@
+[alias]
+ci-build = "build --all-targets"
+ci-fmt = "fmt -- --check"
+ci-lint = "clippy --all-targets -- -D warnings"

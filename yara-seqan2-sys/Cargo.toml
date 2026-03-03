@@ -1,0 +1,26 @@
+[package]
+name = "yara-seqan2-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Nils Homer <nils@fulcrumgenomics.com>"]
+description = "Vendored SeqAn2 headers for the YARA read mapper"
+repository.workspace = true
+homepage = "https://github.com/fulcrumgenomics/rust-yara"
+documentation = "https://docs.rs/yara-seqan2-sys"
+readme = "../README.md"
+categories = ["external-ffi-bindings", "science"]
+keywords = ["bioinformatics", "yara", "seqan", "alignment", "ngs"]
+license.workspace = true
+links = "seqan2"
+include = [
+    "src/",
+    "build.rs",
+    "vendor/include/",
+    "vendor/apps/yara/",
+    "LICENSE",
+    "README.md",
+]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
