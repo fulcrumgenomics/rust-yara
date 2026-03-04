@@ -17,4 +17,4 @@ license.workspace = true
 pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
-yara-mapper-sys = { version = "0.1.0", path = "../yara-sys" }
+yara-mapper-sys = { version = "0.1.1", path = "../yara-sys" }
