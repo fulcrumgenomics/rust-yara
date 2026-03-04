@@ -72,7 +72,7 @@ typedef struct {
     uint16_t flag;              // full SAM flag
 
     // CIGAR (BAM-encoded uint32 array: op | len<<4)
-    const uint32_t* cigar;      // heap-allocated; freed by yara_mapper_free_records
+    uint32_t* cigar;            // heap-allocated; freed by yara_mapper_free_records
     uint32_t cigar_len;         // number of CIGAR operations
 
     // Sequence and quality (NULL for secondaries / unmapped without seq)

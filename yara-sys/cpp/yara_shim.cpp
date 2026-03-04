@@ -196,10 +196,11 @@ struct RecordCollector
     typedef typename Traits::TCigarsSet         TCigarsSet;
     typedef typename Traits::TReadsContext      TReadsContext;
 
-    // Output
+    // Output — out_count is a pointer so that copies made by iterate()
+    // all increment the same counter (SeqAn's iterate passes functors by value).
     YaraAlignmentRecord*    out;
     size_t                  out_capacity;
-    size_t                  out_count;
+    size_t*                 out_count_ptr;
 
     // Shared-memory read-only data.
     TMatchesViewSet const & matchesSet;
@@ -211,6 +212,12 @@ struct RecordCollector
     TReads const &          reads;
     Options const &         options;
 
+    // Contig names for XA tag construction (TAG mode).
+    std::vector<std::string> const * contigNames;
+
+    // Owned counter — lives on the original object, pointed to by copies.
+    size_t                  out_count_storage;
+
     RecordCollector(YaraAlignmentRecord* out,
                     size_t out_capacity,
                     TMatchesViewSet const & matchesSet,
@@ -220,10 +227,11 @@ struct RecordCollector
                     TCigarsSet const & cigarSet,
                     TReadsContext const & ctx,
                     TReads const & reads,
-                    Options const & options) :
+                    Options const & options,
+                    std::vector<std::string> const * contigNames = nullptr) :
         out(out),
         out_capacity(out_capacity),
-        out_count(0),
+        out_count_ptr(nullptr),
         matchesSet(matchesSet),
         primaryMatches(primaryMatches),
         primaryMatchesProbs(primaryMatchesProbs),
@@ -231,11 +239,17 @@ struct RecordCollector
         cigarSet(cigarSet),
         ctx(ctx),
         reads(reads),
-        options(options)
+        options(options),
+        contigNames(contigNames),
+        out_count_storage(0)
     {
+        out_count_ptr = &out_count_storage;
         // Process all primary matches (serially to avoid races on out_count).
         iterate(primaryMatches, *this, Standard(), Serial());
     }
+
+    /// Number of records written.
+    size_t out_count() const { return out_count_storage; }
 
     template <typename TIterator>
     void operator() (TIterator const & it)
@@ -259,8 +273,8 @@ static void _collectMappedRead(RecordCollector<TSpec, Traits> & me, TReadId read
 // so individual records do not need to be zeroed here.
 template <typename TSpec, typename Traits>
 static YaraAlignmentRecord* _nextRecord(RecordCollector<TSpec, Traits> & me) {
-    if (me.out_count >= me.out_capacity) return nullptr;
-    return &me.out[me.out_count++];
+    if (*me.out_count_ptr >= me.out_capacity) return nullptr;
+    return &me.out[(*me.out_count_ptr)++];
 }
 
 // Get the read pair index (0-based) from a readId.
@@ -287,11 +301,13 @@ static uint16_t mateFlags(TReadSeqs const & readSeqs, TReadId readId) {
 }
 
 // Fill XA tag string for secondary matches.
+// Format: contig_name,strand+pos,CIGAR,NM; (when alignSecondary is true)
+// or:     contig_name,begin,end,strand,NM; (when alignSecondary is false)
 template <typename TSpec, typename Traits, typename TMatches, typename TIter>
 static char* _buildXa(RecordCollector<TSpec, Traits> & me, TMatches const & matches, TIter const & primaryIt) {
     typedef typename Value<TMatches const>::Type TMatch;
     std::string xa;
-    xa.reserve(128);
+    xa.reserve(256);
 
     iterate(matches, [&](typename Iterator<TMatches const>::Type const & matchIt)
     {
@@ -299,9 +315,13 @@ static char* _buildXa(RecordCollector<TSpec, Traits> & me, TMatches const & matc
             return;
         TMatch const & match = *matchIt;
 
-        // contig name
+        // Contig identifier: use name if available, otherwise numeric ID
         auto contigId = getMember(match, ContigId());
-        xa += std::to_string(contigId);
+        if (me.contigNames && contigId < me.contigNames->size()) {
+            xa += (*me.contigNames)[contigId];
+        } else {
+            xa += std::to_string(contigId);
+        }
         xa += ',';
         if (me.options.alignSecondary) {
             xa += onForwardStrand(match) ? '+' : '-';
@@ -337,7 +357,6 @@ template <typename TSpec, typename Traits, typename TMatchIt>
 static void _collectMatchesImpl(RecordCollector<TSpec, Traits> & me, TMatchIt const & it) {
     typedef typename Value<TMatchIt const>::Type TMatch;
     TMatch const & primary = value(it);
-
     if (isValid(primary))
         _collectMappedRead(me, position(it, me.primaryMatches), primary);
     else
@@ -436,7 +455,7 @@ static void _collectMappedRead(RecordCollector<TSpec, Traits> & me, TReadId read
 
     // CIGAR
     auto const & cigar = me.primaryCigars[getMember(primary, ReadId())];
-    encodeCigar(cigar, const_cast<uint32_t**>(&rec->cigar), &rec->cigar_len);
+    encodeCigar(cigar, &rec->cigar, &rec->cigar_len);
 
     // Sequence and quality for primary
     auto readSeqId = getReadSeqId(primary, me.reads.seqs);
@@ -475,7 +494,7 @@ static void _collectMappedRead(RecordCollector<TSpec, Traits> & me, TReadId read
             // CIGAR for secondary (if align_secondary)
             if (me.options.alignSecondary) {
                 auto const & scigar = me.cigarSet[getMember(match, ReadId())][position(matchIt, matches)];
-                encodeCigar(scigar, const_cast<uint32_t**>(&srec->cigar), &srec->cigar_len);
+                encodeCigar(scigar, &srec->cigar, &srec->cigar_len);
             }
 
             // Secondaries don't get seq/qual (SEQ=*, QUAL=*)
@@ -703,10 +722,11 @@ private:
             me.primaryMatches, me.primaryMatchesProbs,
             me.primaryCigars, me.cigarsSet,
             me.ctx, me.reads,
-            me.options
+            me.options,
+            &contigNameStrings
         );
 
-        int64_t count = static_cast<int64_t>(collector.out_count);
+        int64_t count = static_cast<int64_t>(collector.out_count());
 
         clearMatches(me);
         clearAlignments(me);
