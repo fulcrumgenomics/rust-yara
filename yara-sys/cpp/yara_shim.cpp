@@ -99,15 +99,72 @@ static uint8_t cigarOpCode(char c) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FieldPools — bump allocator for seq/qual/cigar fields.
+//
+// Reduces per-record heap allocations to two bulk allocations per batch.
+// XA strings remain individually heap-allocated (unpredictable sizes).
+// The pool is owned by MapperInstance and reused across mapPaired calls.
+// ---------------------------------------------------------------------------
+
+struct FieldPools {
+    char*     char_buf;
+    size_t    char_cap;
+    size_t    char_used;
+
+    uint32_t* cigar_buf;
+    size_t    cigar_cap;
+    size_t    cigar_used;
+
+    FieldPools() : char_buf(nullptr), char_cap(0), char_used(0),
+                   cigar_buf(nullptr), cigar_cap(0), cigar_used(0) {}
+    ~FieldPools() { delete[] char_buf; delete[] cigar_buf; }
+
+    FieldPools(FieldPools const &) = delete;
+    FieldPools& operator=(FieldPools const &) = delete;
+
+    void prepare(size_t char_need, size_t cigar_need) {
+        if (char_need > char_cap) {
+            delete[] char_buf;
+            char_buf = new char[char_need];
+            char_cap = char_need;
+        }
+        char_used = 0;
+        if (cigar_need > cigar_cap) {
+            delete[] cigar_buf;
+            cigar_buf = new uint32_t[cigar_need];
+            cigar_cap = cigar_need;
+        }
+        cigar_used = 0;
+    }
+
+    char* alloc_chars(size_t n) {
+        if (char_used + n > char_cap)
+            throw std::runtime_error("FieldPools char buffer exhausted");
+        char* p = char_buf + char_used;
+        char_used += n;
+        return p;
+    }
+
+    uint32_t* alloc_cigar(size_t n) {
+        if (cigar_used + n > cigar_cap)
+            throw std::runtime_error("FieldPools cigar buffer exhausted");
+        uint32_t* p = cigar_buf + cigar_used;
+        cigar_used += n;
+        return p;
+    }
+};
+
 template <typename TCigar>
-static void encodeCigar(TCigar const & cigar, uint32_t** out_ops, uint32_t* out_len) {
+static void encodeCigar(TCigar const & cigar, uint32_t** out_ops, uint32_t* out_len,
+                        FieldPools& pools) {
     auto n = length(cigar);
     if (n == 0) {
         *out_ops = nullptr;
         *out_len = 0;
         return;
     }
-    uint32_t* ops = new uint32_t[n];
+    uint32_t* ops = pools.alloc_cigar(n);
     for (unsigned i = 0; i < n; ++i) {
         auto const & el = cigar[i];
         ops[i] = (static_cast<uint32_t>(el.count) << 4) | cigarOpCode(el.operation);
@@ -116,29 +173,29 @@ static void encodeCigar(TCigar const & cigar, uint32_t** out_ops, uint32_t* out_
     *out_len = static_cast<uint32_t>(n);
 }
 
-// Copy a SeqAn Dna5Q string to a heap-allocated C string (ACGTN text).
+// Copy a SeqAn Dna5Q string to a C string (ACGTN text).
+// Pool overload: allocates from the provided FieldPools.
+static const char BASES_TABLE[] = "ACGTN";
+
 template <typename TSeq>
-static char* seqToString(TSeq const & seq) {
+static char* seqToString(TSeq const & seq, FieldPools& pools) {
     auto n = length(seq);
-    char* buf = new char[n + 1];
+    char* buf = pools.alloc_chars(n + 1);
     for (unsigned i = 0; i < n; ++i) {
-        // ordValue: A=0, C=1, G=2, T=3, N=4
-        static const char bases[] = "ACGTN";
-        auto ord = ordValue(seq[i]);
-        buf[i] = bases[std::min(static_cast<unsigned>(ord), 4u)];
+        buf[i] = BASES_TABLE[std::min(static_cast<unsigned>(ordValue(seq[i])), 4u)];
     }
     buf[n] = '\0';
     return buf;
 }
 
 // Extract quality string from a Dna5Q sequence as phred+33.
+// Pool overload: allocates from the provided FieldPools.
 template <typename TSeq>
-static char* qualToString(TSeq const & seq) {
+static char* qualToString(TSeq const & seq, FieldPools& pools) {
     auto n = length(seq);
-    char* buf = new char[n + 1];
+    char* buf = pools.alloc_chars(n + 1);
     for (unsigned i = 0; i < n; ++i) {
-        auto q = getQualityValue(seq[i]);
-        buf[i] = static_cast<char>(q + 33);
+        buf[i] = static_cast<char>(getQualityValue(seq[i]) + 33);
     }
     buf[n] = '\0';
     return buf;
@@ -161,13 +218,17 @@ static void writeError(char* buf, size_t buf_len, const char* msg) {
     }
 }
 
-// Free heap-allocated fields (cigar, seq, qual, xa) from record structs.
+// Free dynamically allocated fields from record structs.
+// Pool-managed records (_pool_managed != 0): only xa is individually freed.
+// Non-pool records (_pool_managed == 0): cigar, seq, qual, and xa are all freed.
 static void freeRecordFields(YaraAlignmentRecord* records, size_t count) {
     if (!records) return;
     for (size_t i = 0; i < count; ++i) {
-        delete[] records[i].cigar;
-        delete[] records[i].seq;
-        delete[] records[i].qual;
+        if (!records[i]._pool_managed) {
+            delete[] records[i].cigar;
+            delete[] records[i].seq;
+            delete[] records[i].qual;
+        }
         delete[] records[i].xa;
         records[i].cigar = nullptr;
         records[i].seq = nullptr;
@@ -215,6 +276,9 @@ struct RecordCollector
     // Contig names for XA tag construction (TAG mode).
     std::vector<std::string> const * contigNames;
 
+    // Pool allocator for seq/qual/cigar fields (owned by MapperInstance).
+    FieldPools* pools;
+
     // Owned counter — lives on the original object, pointed to by copies.
     size_t                  out_count_storage;
 
@@ -228,7 +292,8 @@ struct RecordCollector
                     TReadsContext const & ctx,
                     TReads const & reads,
                     Options const & options,
-                    std::vector<std::string> const * contigNames = nullptr) :
+                    std::vector<std::string> const * contigNames,
+                    FieldPools* pools) :
         out(out),
         out_capacity(out_capacity),
         out_count_ptr(nullptr),
@@ -241,6 +306,7 @@ struct RecordCollector
         reads(reads),
         options(options),
         contigNames(contigNames),
+        pools(pools),
         out_count_storage(0)
     {
         out_count_ptr = &out_count_storage;
@@ -382,9 +448,10 @@ static void _collectUnmappedRead(RecordCollector<TSpec, Traits> & me, TReadId re
     auto readSeqId = getFirstMateFwdSeqId(me.reads.seqs, readId);
     if (!isRead1(me.reads.seqs, readId))
         readSeqId = getSecondMateFwdSeqId(me.reads.seqs, getPairIndex(me.reads.seqs, readId));
-    rec->seq = seqToString(me.reads.seqs[readSeqId]);
-    rec->qual = qualToString(me.reads.seqs[readSeqId]);
+    rec->seq = seqToString(me.reads.seqs[readSeqId], *me.pools);
+    rec->qual = qualToString(me.reads.seqs[readSeqId], *me.pools);
     rec->seq_len = length(me.reads.seqs[readSeqId]);
+    rec->_pool_managed = 1;
 }
 
 // Write mapped read (paired-end).
@@ -455,13 +522,14 @@ static void _collectMappedRead(RecordCollector<TSpec, Traits> & me, TReadId read
 
     // CIGAR
     auto const & cigar = me.primaryCigars[getMember(primary, ReadId())];
-    encodeCigar(cigar, &rec->cigar, &rec->cigar_len);
+    encodeCigar(cigar, &rec->cigar, &rec->cigar_len, *me.pools);
 
     // Sequence and quality for primary
     auto readSeqId = getReadSeqId(primary, me.reads.seqs);
-    rec->seq = seqToString(me.reads.seqs[readSeqId]);
-    rec->qual = qualToString(me.reads.seqs[readSeqId]);
+    rec->seq = seqToString(me.reads.seqs[readSeqId], *me.pools);
+    rec->qual = qualToString(me.reads.seqs[readSeqId], *me.pools);
     rec->seq_len = length(me.reads.seqs[readSeqId]);
+    rec->_pool_managed = 1;
 
     // XA tag for secondary matches
     TIter primaryIt = findMatch(matches, primary);
@@ -494,13 +562,14 @@ static void _collectMappedRead(RecordCollector<TSpec, Traits> & me, TReadId read
             // CIGAR for secondary (if align_secondary)
             if (me.options.alignSecondary) {
                 auto const & scigar = me.cigarSet[getMember(match, ReadId())][position(matchIt, matches)];
-                encodeCigar(scigar, &srec->cigar, &srec->cigar_len);
+                encodeCigar(scigar, &srec->cigar, &srec->cigar_len, *me.pools);
             }
 
             // Secondaries don't get seq/qual (SEQ=*, QUAL=*)
             srec->seq = nullptr;
             srec->qual = nullptr;
             srec->seq_len = 0;
+            srec->_pool_managed = 1;
         }, Standard(), Serial());
     }
 }
@@ -563,6 +632,9 @@ struct MapperInstance : MapperBase {
     // Cached contig name C-strings for the lifetime of the handle.
     std::vector<std::string> contigNameStrings;
 
+    // Pool allocator for seq/qual/cigar fields, reused across mapPaired calls.
+    FieldPools pools;
+
     MapperInstance(Options const & opts) : options(opts), mapper(options) {}
 
     void loadIndex() {
@@ -608,9 +680,8 @@ struct MapperInstance : MapperBase {
         typedef typename TTraits::TMatch       TMatch;
         typedef typename TTraits::TReads::TSeq TReadSeq;
 
-        // Zero the output buffer once up front so all pointer fields start
-        // as null.  This is the single point of zeroing — _nextRecord and
-        // the Rust caller rely on this instead of doing their own memset.
+        // Zero-initialize the output buffer so all pointer fields start as
+        // null.  This is required for safe cleanup in the error path.
         std::memset(out, 0, out_capacity * sizeof(YaraAlignmentRecord));
 
         try {
@@ -715,6 +786,18 @@ private:
             verifyMatches(me);
         alignMatches(me);
 
+        // Prepare pools for seq/qual/cigar allocation.
+        // Exact sizing for seq+qual (forward reads only); generous for cigar.
+        {
+            size_t n_fwd = length(readSeqs) / 2;
+            size_t char_need = 0;
+            for (size_t i = 0; i < n_fwd; ++i) {
+                char_need += (length(readSeqs[i]) + 1) * 2; // seq + qual per read
+            }
+            size_t cigar_need = out_capacity * 64; // 64 ops per record (generous)
+            pools.prepare(char_need, cigar_need);
+        }
+
         // Collect results into C structs instead of writing SAM.
         RecordCollector<void, TTraits> collector(
             out, out_capacity,
@@ -723,7 +806,8 @@ private:
             me.primaryCigars, me.cigarsSet,
             me.ctx, me.reads,
             me.options,
-            &contigNameStrings
+            &contigNameStrings,
+            &pools
         );
 
         int64_t count = static_cast<int64_t>(collector.out_count());

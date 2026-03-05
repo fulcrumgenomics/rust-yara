@@ -3,7 +3,9 @@ use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::error::YaraError;
-use crate::ffi_helpers::{collect_contig_lengths, collect_contig_names, path_to_cstring};
+use crate::ffi_helpers::{
+    bytes_to_cstring, collect_contig_lengths, collect_contig_names, path_to_cstring,
+};
 use crate::options::{MapperOptions, SecondaryMode};
 use crate::record::{CigarOp, YaraRecord};
 
@@ -73,18 +75,10 @@ impl ReadBatch {
         }
         self.names
             .push(CString::new(name).map_err(|e| YaraError::InvalidInput(format!("name: {e}")))?);
-        self.r1_seqs.push(
-            CString::new(r1.seq).map_err(|e| YaraError::InvalidInput(format!("r1_seq: {e}")))?,
-        );
-        self.r1_quals.push(
-            CString::new(r1.qual).map_err(|e| YaraError::InvalidInput(format!("r1_qual: {e}")))?,
-        );
-        self.r2_seqs.push(
-            CString::new(r2.seq).map_err(|e| YaraError::InvalidInput(format!("r2_seq: {e}")))?,
-        );
-        self.r2_quals.push(
-            CString::new(r2.qual).map_err(|e| YaraError::InvalidInput(format!("r2_qual: {e}")))?,
-        );
+        self.r1_seqs.push(bytes_to_cstring(r1.seq));
+        self.r1_quals.push(bytes_to_cstring(r1.qual));
+        self.r2_seqs.push(bytes_to_cstring(r2.seq));
+        self.r2_quals.push(bytes_to_cstring(r2.qual));
         Ok(())
     }
 
@@ -98,6 +92,15 @@ impl ReadBatch {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
+    }
+
+    /// Clear all reads, retaining allocated capacity for reuse.
+    pub fn clear(&mut self) {
+        self.names.clear();
+        self.r1_seqs.clear();
+        self.r1_quals.clear();
+        self.r2_seqs.clear();
+        self.r2_quals.clear();
     }
 }
 
@@ -192,7 +195,8 @@ impl YaraMapper {
 
         let capacity = reads.len() * records_per_pair(self.secondary_mode);
         // SAFETY: YaraAlignmentRecord is #[repr(C)] POD — all-zeros is a valid
-        // representation (null pointers, zero scalars).
+        // representation (null pointers, zero scalars).  The C++ shim also
+        // memsets the buffer, but we zero here defensively.
         let mut out_records: Vec<yara_mapper_sys::YaraAlignmentRecord> =
             vec![unsafe { std::mem::zeroed() }; capacity];
 
@@ -222,20 +226,15 @@ impl YaraMapper {
         )]
         let n = count as usize;
 
-        // Convert each C record to an owned Rust type, freeing the C++ memory
-        // for that record immediately.  This avoids holding two copies of all
-        // records simultaneously and is safe against panics (only the current
-        // record's C++ memory can leak if convert_record panics).
-        let results: Vec<YaraRecord> = out_records[..n]
-            .iter()
-            .map(|rec| {
-                let converted = convert_record(rec);
-                unsafe {
-                    yara_mapper_sys::yara_mapper_free_record(std::ptr::from_ref(rec).cast_mut());
-                }
-                converted
-            })
-            .collect();
+        // Convert each C record to an owned Rust type, then batch-free the
+        // C++ memory.  Pool-managed fields (seq/qual/cigar) are freed when the
+        // pool is cleared on the next mapPaired call; only XA strings are freed
+        // by free_records.
+        let results: Vec<YaraRecord> = out_records[..n].iter().map(convert_record).collect();
+
+        unsafe {
+            yara_mapper_sys::yara_mapper_free_records(out_records.as_mut_ptr(), n);
+        }
 
         Ok(results)
     }

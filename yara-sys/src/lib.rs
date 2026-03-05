@@ -55,6 +55,7 @@ pub struct YaraReadBatch {
 /// A single alignment record returned by the mapper.
 #[repr(C)]
 #[derive(Debug, Clone)]
+#[allow(clippy::pub_underscore_fields)]
 pub struct YaraAlignmentRecord {
     // Read identification
     pub read_pair_index: u32,
@@ -90,6 +91,9 @@ pub struct YaraAlignmentRecord {
 
     // XA tag string (NULL if none)
     pub xa: *const c_char,
+
+    // Internal: if set, seq/qual/cigar are pool-managed (not individually freed).
+    pub _pool_managed: u8,
 }
 
 // ---------------------------------------------------------------------------

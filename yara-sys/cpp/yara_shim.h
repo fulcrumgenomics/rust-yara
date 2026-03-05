@@ -72,16 +72,31 @@ typedef struct {
     uint16_t flag;              // full SAM flag
 
     // CIGAR (BAM-encoded uint32 array: op | len<<4)
-    uint32_t* cigar;            // heap-allocated; freed by yara_mapper_free_records
+    //
+    // When _pool_managed is set, allocated from a shared bump pool that is
+    // reused across mapPaired calls — do NOT free individually.  When
+    // _pool_managed is 0, heap-allocated and freed by yara_mapper_free_records.
+    uint32_t* cigar;
     uint32_t cigar_len;         // number of CIGAR operations
 
     // Sequence and quality (NULL for secondaries / unmapped without seq)
-    const char* seq;            // heap-allocated; freed by yara_mapper_free_records
-    const char* qual;           // heap-allocated; freed by yara_mapper_free_records
+    //
+    // Same ownership as cigar: pool-managed when _pool_managed is set,
+    // otherwise heap-allocated and freed by yara_mapper_free_records.
+    const char* seq;
+    const char* qual;
     uint32_t seq_len;
 
     // XA tag (when secondary_mode=TAG, populated for primary records)
-    const char* xa;             // heap-allocated; freed by yara_mapper_free_records
+    // Always individually heap-allocated; freed by yara_mapper_free_records
+    // regardless of _pool_managed.
+    const char* xa;
+
+    // Internal: when non-zero, seq/qual/cigar are allocated from a shared
+    // pool and must NOT be individually freed.  yara_mapper_free_records
+    // only frees xa in this case.  When zero, all pointer fields are
+    // individually heap-allocated and freed by yara_mapper_free_records.
+    uint8_t _pool_managed;
 } YaraAlignmentRecord;
 
 // ---------------------------------------------------------------------------
@@ -120,10 +135,13 @@ size_t yara_mapper_contig_length(const YaraMapperHandle* handle, size_t idx);
 /// Free the mapper and all associated memory.
 void yara_mapper_close(YaraMapperHandle* handle);
 
-/// Free heap-allocated fields in a batch of records (cigar, seq, qual, xa).
+/// Free dynamically allocated fields in a batch of records.
+/// For pool-managed records (_pool_managed != 0), only xa is freed.
+/// For non-pool records, all pointer fields (cigar, seq, qual, xa) are freed.
 void yara_mapper_free_records(YaraAlignmentRecord* records, size_t count);
 
-/// Free heap-allocated fields in a single record (cigar, seq, qual, xa).
+/// Free dynamically allocated fields in a single record.
+/// Same ownership rules as yara_mapper_free_records.
 void yara_mapper_free_record(YaraAlignmentRecord* record);
 
 #ifdef __cplusplus

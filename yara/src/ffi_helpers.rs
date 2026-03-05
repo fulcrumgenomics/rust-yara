@@ -41,6 +41,17 @@ pub(crate) unsafe fn collect_contig_names(
         .collect()
 }
 
+/// Convert a byte slice of DNA bases or quality scores to a [`CString`].
+///
+/// # Safety
+///
+/// The caller must ensure the bytes do not contain interior null bytes.
+/// This is guaranteed for ASCII DNA bases (ACGTN, a-t) and phred+33
+/// quality values (0x21..0x7E).
+pub(crate) fn bytes_to_cstring(bytes: &[u8]) -> CString {
+    unsafe { CString::from_vec_unchecked(bytes.to_vec()) }
+}
+
 /// Collect contig lengths from an FFI handle by calling `length_fn` for each index.
 pub(crate) fn collect_contig_lengths(
     count: usize,
