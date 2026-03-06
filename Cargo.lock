@@ -73,7 +73,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "yara-mapper"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "yara-mapper-sys",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "yara-mapper-sys"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "yara-seqan2-sys",
@@ -89,4 +89,4 @@ dependencies = [
 
 [[package]]
 name = "yara-seqan2-sys"
-version = "0.1.1"
+version = "0.1.2"
