@@ -902,7 +902,7 @@ YaraMapperHandle* yara_mapper_open(
         options.contigsIndexFile = index_prefix;
         options.errorRate = opts->error_rate;
         options.strataRate = opts->strata_rate;
-        options.strataCount = (opts->strata_count < 0) ? static_cast<uint64_t>(-1) : opts->strata_count;
+        options.strataCount = (opts->strata_count < 0) ? static_cast<uint64_t>(-1u) : opts->strata_count;
         options.sensitivity = static_cast<Sensitivity>(opts->sensitivity);
         options.threadsCount = std::max(opts->threads, 1);
         options.secondaryMatches = static_cast<SecondaryAlignments>(opts->secondary_mode);
