@@ -21,3 +21,4 @@ yara-mapper-sys = { version = "0.1.2", path = "../yara-sys" }
 
 [dev-dependencies]
 flate2 = "1"
+tempfile = "3"
